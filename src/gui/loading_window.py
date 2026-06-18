@@ -1,8 +1,9 @@
 """加载窗口模块"""
 
+import os
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont, QMovie
+from PyQt6.QtGui import QFont, QMovie, QIcon
 
 from ..core.network import NetworkManager
 
@@ -31,6 +32,11 @@ class LoadingWindow(QWidget):
 
     def __init__(self):
         super().__init__()
+
+        # 设置窗口图标
+        icon_path = os.path.join(os.path.dirname(__file__), "..", "..", "assets", "icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         # 无边框窗口
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)

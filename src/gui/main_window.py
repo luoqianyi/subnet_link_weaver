@@ -46,6 +46,12 @@ class MainWindow(QMainWindow):
 
     def _init_ui(self):
         """初始化用户界面"""
+        # 设置窗口图标
+        import os
+        icon_path = os.path.join(os.path.dirname(__file__), "..", "..", "assets", "icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
         # 设置窗口属性
         self.setWindowTitle("Subnet Link Weaver v1.0.0")
         self.setMinimumSize(QSize(800, 600))
