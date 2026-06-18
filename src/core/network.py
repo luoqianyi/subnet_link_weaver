@@ -66,25 +66,58 @@ class NetworkManager:
         """
         self.timeout = timeout
 
-    def _run_command(self, command: str) -> tuple[bool, str, str]:
+    def _run_command(self, command: str, use_powershell: bool = False) -> tuple[bool, str, str]:
         """
         执行系统命令
 
         Args:
             command: 要执行的命令
+            use_powershell: 是否使用 PowerShell 执行
 
         Returns:
             (成功标志, 标准输出, 标准错误)
         """
         try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout
-            )
-            return result.returncode == 0, result.stdout, result.stderr
+            if use_powershell:
+                # 使用 PowerShell 执行命令，设置 UTF-8 编码
+                cmd = f'powershell -Command "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}"'
+                result = subprocess.run(
+                    cmd,
+                    shell=True,
+                    capture_output=True,
+                    timeout=self.timeout
+                )
+                # 尝试多种编码解码
+                for encoding in ['utf-8', 'gbk', 'cp936', 'latin1']:
+                    try:
+                        stdout = result.stdout.decode(encoding)
+                        stderr = result.stderr.decode(encoding)
+                        return result.returncode == 0, stdout, stderr
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+                # 如果所有编码都失败，使用 latin1 作为后备
+                stdout = result.stdout.decode('latin1')
+                stderr = result.stderr.decode('latin1')
+                return result.returncode == 0, stdout, stderr
+            else:
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    timeout=self.timeout
+                )
+                # 尝试多种编码解码
+                for encoding in ['utf-8', 'gbk', 'cp936', 'latin1']:
+                    try:
+                        stdout = result.stdout.decode(encoding)
+                        stderr = result.stderr.decode(encoding)
+                        return result.returncode == 0, stdout, stderr
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+                # 如果所有编码都失败，使用 latin1 作为后备
+                stdout = result.stdout.decode('latin1')
+                stderr = result.stderr.decode('latin1')
+                return result.returncode == 0, stdout, stderr
         except subprocess.TimeoutExpired:
             raise CommandTimeoutError(f"命令执行超时: {command}")
         except Exception as e:
@@ -99,29 +132,49 @@ class NetworkManager:
         """
         adapters = []
 
-        # 获取适配器列表
-        cmd = "netsh interface show interface"
-        success, stdout, stderr = self._run_command(cmd)
+        # 使用 PowerShell 获取适配器列表（更可靠的编码处理）
+        cmd = "Get-NetAdapter | Select-Object Name, Status, InterfaceDescription | Format-Table -AutoSize"
+        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
 
         if not success:
-            raise NetworkError(f"获取适配器列表失败: {stderr}")
+            # 回退到 netsh 命令
+            cmd = "netsh interface show interface"
+            success, stdout, stderr = self._run_command(cmd)
+
+            if not success:
+                raise NetworkError(f"获取适配器列表失败: {stderr}")
 
         # 解析输出
         lines = stdout.strip().split('\n')
         for line in lines[2:]:  # 跳过标题行
             parts = line.split()
-            if len(parts) >= 4:
-                admin_state = parts[0]
-                state = parts[1]
-                name = ' '.join(parts[2:])
+            if len(parts) >= 2:
+                # 检查是否是 PowerShell 输出格式
+                if "Format-Table" in stdout or "Name" in lines[0]:
+                    # PowerShell 输出格式
+                    name = parts[0]
+                    status_str = parts[1] if len(parts) > 1 else "Unknown"
 
-                # 确定适配器状态
-                if state == "Connected":
-                    status = AdapterStatus.CONNECTED
-                elif state == "Disconnected":
-                    status = AdapterStatus.DISCONNECTED
+                    # 确定适配器状态
+                    if status_str.lower() == "up":
+                        status = AdapterStatus.CONNECTED
+                    elif status_str.lower() == "down":
+                        status = AdapterStatus.DISCONNECTED
+                    else:
+                        status = AdapterStatus.UNKNOWN
                 else:
-                    status = AdapterStatus.UNKNOWN
+                    # netsh 输出格式
+                    admin_state = parts[0]
+                    state = parts[1]
+                    name = ' '.join(parts[2:])
+
+                    # 确定适配器状态
+                    if state == "Connected":
+                        status = AdapterStatus.CONNECTED
+                    elif state == "Disconnected":
+                        status = AdapterStatus.DISCONNECTED
+                    else:
+                        status = AdapterStatus.UNKNOWN
 
                 # 获取 IP 配置
                 ip_info = self._get_ip_config(name)
@@ -156,39 +209,78 @@ class NetworkManager:
             "is_dhcp": False
         }
 
-        # 获取 IP 地址
-        cmd = f'netsh interface ip show address "{adapter_name}"'
-        success, stdout, stderr = self._run_command(cmd)
+        # 使用 PowerShell 获取 IP 配置
+        cmd = f'Get-NetIPAddress -InterfaceAlias "{adapter_name}" -AddressFamily IPv4 | Select-Object IPAddress, PrefixLength'
+        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
 
-        if success:
-            # 解析 IP 地址
-            ip_match = re.search(r'IP 地址:\s+(\d+\.\d+\.\d+\.\d+)', stdout)
-            if ip_match:
-                config["ip"] = ip_match.group(1)
+        if success and stdout.strip():
+            # 解析 PowerShell 输出
+            lines = stdout.strip().split('\n')
+            for line in lines[2:]:  # 跳过标题行
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip = parts[0]
+                    prefix_length = parts[1]
 
-            # 解析子网掩码
-            mask_match = re.search(r'子网掩码:\s+(\d+\.\d+\.\d+\.\d+)', stdout)
-            if mask_match:
-                config["mask"] = mask_match.group(1)
+                    # 验证 IP 地址格式
+                    if self._validate_ip(ip):
+                        config["ip"] = ip
 
-            # 解析默认网关
-            gateway_match = re.search(r'默认网关:\s+(\d+\.\d+\.\d+\.\d+)', stdout)
-            if gateway_match:
-                config["gateway"] = gateway_match.group(1)
+                        # 将前缀长度转换为子网掩码
+                        if prefix_length.isdigit():
+                            prefix = int(prefix_length)
+                            mask = self._prefix_to_subnet_mask(prefix)
+                            config["mask"] = mask
+                        break
 
-            # 检查是否为 DHCP
-            if "DHCP 已启用: 是" in stdout:
-                config["is_dhcp"] = True
+        # 获取默认网关
+        cmd = f'Get-NetRoute -InterfaceAlias "{adapter_name}" -DestinationPrefix "0.0.0.0/0" | Select-Object NextHop'
+        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
+
+        if success and stdout.strip():
+            lines = stdout.strip().split('\n')
+            for line in lines[2:]:
+                parts = line.split()
+                if parts:
+                    gateway = parts[0]
+                    if self._validate_ip(gateway):
+                        config["gateway"] = gateway
+                        break
 
         # 获取 DNS 服务器
-        cmd = f'netsh interface ip show dns "{adapter_name}"'
-        success, stdout, stderr = self._run_command(cmd)
+        cmd = f'Get-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -AddressFamily IPv4 | Select-Object ServerAddresses'
+        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
 
-        if success:
+        if success and stdout.strip():
+            # 解析 DNS 服务器地址（可能以逗号分隔）
             dns_matches = re.findall(r'(\d+\.\d+\.\d+\.\d+)', stdout)
             config["dns"] = dns_matches
 
+        # 检查是否为 DHCP
+        cmd = f'Get-NetIPInterface -InterfaceAlias "{adapter_name}" -AddressFamily IPv4 | Select-Object Dhcp'
+        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
+
+        if success and stdout.strip():
+            if "Enabled" in stdout:
+                config["is_dhcp"] = True
+
         return config
+
+    def _prefix_to_subnet_mask(self, prefix: int) -> str:
+        """
+        将前缀长度转换为子网掩码
+
+        Args:
+            prefix: 前缀长度
+
+        Returns:
+            子网掩码
+        """
+        if prefix < 0 or prefix > 32:
+            return "255.255.255.0"
+
+        mask = (0xffffffff >> (32 - prefix)) << (32 - prefix)
+        return f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
 
     def set_static_ip(
         self,
@@ -317,5 +409,67 @@ class NetworkManager:
             octet = int(match.group(i))
             if octet < 0 or octet > 255:
                 return False
+
+        return True
+
+    def get_all_ips(self, adapter_name: str) -> List[dict]:
+        """
+        获取指定适配器的所有 IP 地址
+
+        Args:
+            adapter_name: 适配器名称
+
+        Returns:
+            IP 地址列表
+        """
+        ips = []
+
+        cmd = f'Get-NetIPAddress -InterfaceAlias "{adapter_name}" -AddressFamily IPv4 | Select-Object IPAddress, PrefixLength'
+        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
+
+        if success and stdout.strip():
+            lines = stdout.strip().split('\n')
+            for line in lines[2:]:  # 跳过标题行
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip = parts[0]
+                    prefix_length = parts[1]
+
+                    if self._validate_ip(ip):
+                        mask = "255.255.255.0"
+                        if prefix_length.isdigit():
+                            mask = self._prefix_to_subnet_mask(int(prefix_length))
+
+                        ips.append({
+                            "ip": ip,
+                            "mask": mask,
+                            "prefix": prefix_length
+                        })
+
+        return ips
+
+    def set_dhcp(self, adapter_name: str) -> bool:
+        """
+        设置适配器为 DHCP 自动获取 IP
+
+        Args:
+            adapter_name: 适配器名称
+
+        Returns:
+            操作是否成功
+        """
+        # 设置 IP 为 DHCP
+        cmd = f'netsh interface ip set address "{adapter_name}" dhcp'
+        success, stdout, stderr = self._run_command(cmd)
+
+        if not success:
+            raise NetworkError(f"设置 DHCP 失败: {stderr}")
+
+        # 设置 DNS 为 DHCP
+        cmd = f'netsh interface ip set dns "{adapter_name}" dhcp'
+        success, stdout, stderr = self._run_command(cmd)
+
+        if not success:
+            raise NetworkError(f"设置 DNS DHCP 失败: {stderr}")
 
         return True

@@ -142,6 +142,8 @@ class ConfigManager:
         # 配置文件路径
         self.app_config_file = self.config_dir / "app_config.json"
         self.saved_configs_file = self.config_dir / "saved_configs.json"
+        self.history_ips_file = self.config_dir / "history_ips.json"
+        self.network_state_file = self.config_dir / "network_state.json"
 
     def load_app_config(self) -> AppConfig:
         """
@@ -269,3 +271,131 @@ class ConfigManager:
             if config.name == name:
                 return config
         return None
+
+    # ============================================
+    # 历史 IP 记录
+    # ============================================
+
+    def load_history_ips(self) -> list[str]:
+        """
+        加载历史 IP 记录
+
+        Returns:
+            历史 IP 列表
+        """
+        if not self.history_ips_file.exists():
+            return []
+
+        try:
+            with open(self.history_ips_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("ips", [])
+        except Exception:
+            return []
+
+    def save_history_ips(self, ips: list[str]) -> bool:
+        """
+        保存历史 IP 记录
+
+        Args:
+            ips: IP 列表
+
+        Returns:
+            操作是否成功
+        """
+        try:
+            with open(self.history_ips_file, "w", encoding="utf-8") as f:
+                json.dump({"ips": ips}, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception:
+            return False
+
+    def add_history_ip(self, ip: str) -> bool:
+        """
+        添加历史 IP 记录
+
+        Args:
+            ip: IP 地址
+
+        Returns:
+            操作是否成功
+        """
+        ips = self.load_history_ips()
+
+        # 移除重复项
+        if ip in ips:
+            ips.remove(ip)
+
+        # 添加到开头
+        ips.insert(0, ip)
+
+        # 最多保存 10 条
+        ips = ips[:10]
+
+        return self.save_history_ips(ips)
+
+    def remove_history_ip(self, ip: str) -> bool:
+        """
+        移除历史 IP 记录
+
+        Args:
+            ip: IP 地址
+
+        Returns:
+            操作是否成功
+        """
+        ips = self.load_history_ips()
+        if ip in ips:
+            ips.remove(ip)
+        return self.save_history_ips(ips)
+
+    # ============================================
+    # 网络状态保存/加载（用于还原）
+    # ============================================
+
+    def save_network_state(self, state: dict) -> bool:
+        """
+        保存当前网络状态
+
+        Args:
+            state: 网络状态字典
+
+        Returns:
+            操作是否成功
+        """
+        try:
+            with open(self.network_state_file, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception:
+            return False
+
+    def load_network_state(self) -> Optional[dict]:
+        """
+        加载网络状态
+
+        Returns:
+            网络状态字典，如果不存在则返回 None
+        """
+        if not self.network_state_file.exists():
+            return None
+
+        try:
+            with open(self.network_state_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def clear_network_state(self) -> bool:
+        """
+        清除网络状态
+
+        Returns:
+            操作是否成功
+        """
+        try:
+            if self.network_state_file.exists():
+                self.network_state_file.unlink()
+            return True
+        except Exception:
+            return False
