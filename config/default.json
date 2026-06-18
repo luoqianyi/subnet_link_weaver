@@ -1,0 +1,14 @@
+{
+  "default_subnet": "192.168.88",
+  "default_mask": "255.255.255.0",
+  "default_dns": ["114.114.114.114"],
+  "auto_disable_firewall": false,
+  "firewall_restore_reminder": true,
+  "ping_count": 4,
+  "ping_timeout": 1000,
+  "window_width": 800,
+  "window_height": 600,
+  "theme": "light",
+  "log_level": "INFO",
+  "log_file": "logs/app.log"
+}
