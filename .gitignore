@@ -64,3 +64,6 @@ htmlcov/
 
 # uv
 .python-version
+
+# Docs
+docs/
