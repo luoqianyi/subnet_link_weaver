@@ -3,8 +3,9 @@
 def convert_svg_to_ico():
     """使用 Pillow 创建 ICO 图标"""
     try:
-        from PIL import Image, ImageDraw, ImageFont
-        import io
+        from PIL import Image, ImageDraw
+        import os
+        import struct
 
         # 创建一个简单的图标
         def create_icon(size):
@@ -52,20 +53,43 @@ def convert_svg_to_ico():
 
             return img
 
-        # 创建不同尺寸的图标
+        # 先保存为 PNG
+        png_path = "assets/icon.png"
+        img_256 = create_icon(256)
+        img_256.save(png_path, format="PNG")
+
+        # 使用 Pillow 转换为 ICO
+        # 创建不同尺寸的图像
         sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-        images = [create_icon(s[0]) for s in sizes]
+        images = []
+        for size in sizes:
+            img = create_icon(size[0])
+            images.append(img)
 
         # 保存为 ICO
-        images[0].save("assets/icon.ico", format="ICO",
-                       append_images=images[1:],
-                       sizes=sizes)
+        output_path = "assets/icon.ico"
+        # 使用第一个图像作为基础，其他图像作为附加
+        images[0].save(
+            output_path,
+            format="ICO",
+            append_images=images[1:],
+            sizes=sizes
+        )
 
-        print("图标创建成功: assets/icon.ico")
+        # 验证文件
+        file_size = os.path.getsize(output_path)
+        print(f"图标创建成功: {output_path} ({file_size} 字节)")
+
+        # 同时保存一个大的 PNG 用于预览
+        img_256.save("assets/icon_256.png", format="PNG")
+        print(f"PNG 图标也已保存: assets/icon_256.png")
+
         return True
 
     except Exception as e:
         print(f"创建失败: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 if __name__ == "__main__":

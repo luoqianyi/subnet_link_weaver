@@ -38,6 +38,9 @@ def build():
 
     # 添加图标（如果存在）
     icon_path = assets_dir / "icon.ico"
+    if not icon_path.exists() or icon_path.stat().st_size < 1000:
+        # 如果 ICO 文件不存在或太小，使用 PNG
+        icon_path = assets_dir / "icon.png"
     if icon_path.exists():
         cmd.extend(["--icon", str(icon_path)])
 
