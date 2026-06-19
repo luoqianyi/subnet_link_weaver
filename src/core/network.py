@@ -123,148 +123,186 @@ class NetworkManager:
         except Exception as e:
             raise NetworkError(f"命令执行失败: {e}")
 
-    def get_adapters(self) -> List[NetworkAdapter]:
+    # 物理网卡判断：排除虚拟/隧道/回环等
+    _VIRTUAL_KEYWORDS = (
+        "virtual", "vmware", "virtualbox", "hyper-v", "loopback", "vethernet",
+        "tap", "tun", "pseudo", "teredo", "isatap", "vpn", "bluetooth", "蓝牙",
+        "wan miniport", "miniport", "kernel debug", "wfp",
+    )
+
+    def _is_physical(self, name: str, description: str) -> bool:
+        """根据名称/描述判断是否物理网卡"""
+        text = f"{name} {description}".lower()
+        return not any(kw in text for kw in self._VIRTUAL_KEYWORDS)
+
+    def _run_ps_script(self, script: str) -> tuple[bool, str, str]:
         """
-        获取所有网络适配器
+        将 PowerShell 脚本写入临时 .ps1 文件并执行，
+        避免 Python -> shell -> PowerShell 多层引号转义问题。
+        """
+        import tempfile
+        import os
+
+        # 用 UTF-8 BOM 保证 PowerShell 正确识别中文
+        fd, path = tempfile.mkstemp(suffix=".ps1")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8-sig") as f:
+                f.write(script)
+
+            cmd = (
+                f'powershell -NoProfile -ExecutionPolicy Bypass '
+                f'-Command "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & \'{path}\'"'
+            )
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, timeout=self.timeout
+            )
+            for encoding in ("utf-8", "gbk", "cp936", "latin1"):
+                try:
+                    stdout = result.stdout.decode(encoding)
+                    stderr = result.stderr.decode(encoding)
+                    return result.returncode == 0, stdout, stderr
+                except (UnicodeDecodeError, LookupError):
+                    continue
+            return (
+                result.returncode == 0,
+                result.stdout.decode("latin1"),
+                result.stderr.decode("latin1"),
+            )
+        except subprocess.TimeoutExpired:
+            raise CommandTimeoutError("PowerShell 脚本执行超时")
+        except Exception as e:
+            raise NetworkError(f"PowerShell 脚本执行失败: {e}")
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def get_adapters(self, physical_only: bool = True) -> List[NetworkAdapter]:
+        """
+        获取所有网络适配器（单条 PowerShell 调用，输出 JSON）
+
+        关键设计：一次性拿到全部适配器 + IP + 网关 + DNS + DHCP，
+        避免为每个适配器单独起 4 个 PowerShell 进程造成的进程风暴。
+
+        Args:
+            physical_only: 仅返回物理且已连接的适配器
 
         Returns:
             网络适配器列表
         """
-        adapters = []
+        ps_script = """
+$ErrorActionPreference = 'SilentlyContinue'
+$result = @()
+foreach ($a in Get-NetAdapter) {
+    $cfg = Get-NetIPConfiguration -InterfaceIndex $a.ifIndex
+    $v4 = Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4
+    $dhcp = (Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4).Dhcp
+    $ips = @($v4 | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" }) -join ','
+    $dns = @($cfg.DNSServer | Where-Object { $_.AddressFamily -eq 2 } | ForEach-Object { $_.ServerAddresses }) -join ','
+    $result += [PSCustomObject]@{
+        Name        = $a.Name
+        Status      = "$($a.Status)"
+        Description = $a.InterfaceDescription
+        Gateway     = $cfg.IPv4DefaultGateway.NextHop
+        Dns         = $dns
+        Dhcp        = "$dhcp"
+        Ips         = $ips
+    }
+}
+$result | ConvertTo-Json -Compress
+"""
 
-        # 使用 PowerShell 获取适配器列表（更可靠的编码处理）
-        cmd = "Get-NetAdapter | Select-Object Name, Status, InterfaceDescription | Format-Table -AutoSize"
-        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
-
+        success, stdout, stderr = self._run_ps_script(ps_script)
         if not success:
-            # 回退到 netsh 命令
-            cmd = "netsh interface show interface"
-            success, stdout, stderr = self._run_command(cmd)
+            raise NetworkError(f"获取适配器列表失败: {stderr}")
 
-            if not success:
-                raise NetworkError(f"获取适配器列表失败: {stderr}")
+        import json
+        stdout = stdout.strip()
+        if not stdout:
+            return []
 
-        # 解析输出
-        lines = stdout.strip().split('\n')
-        for line in lines[2:]:  # 跳过标题行
-            parts = line.split()
-            if len(parts) >= 2:
-                # 检查是否是 PowerShell 输出格式
-                if "Format-Table" in stdout or "Name" in lines[0]:
-                    # PowerShell 输出格式
-                    name = parts[0]
-                    status_str = parts[1] if len(parts) > 1 else "Unknown"
+        try:
+            raw = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            raise NetworkError(f"解析适配器信息失败: {e}")
 
-                    # 确定适配器状态
-                    if status_str.lower() == "up":
-                        status = AdapterStatus.CONNECTED
-                    elif status_str.lower() == "down":
-                        status = AdapterStatus.DISCONNECTED
-                    else:
-                        status = AdapterStatus.UNKNOWN
-                else:
-                    # netsh 输出格式
-                    admin_state = parts[0]
-                    state = parts[1]
-                    name = ' '.join(parts[2:])
+        # 单个对象时 ConvertTo-Json 返回 dict，统一成 list
+        if isinstance(raw, dict):
+            raw = [raw]
 
-                    # 确定适配器状态
-                    if state == "Connected":
-                        status = AdapterStatus.CONNECTED
-                    elif state == "Disconnected":
-                        status = AdapterStatus.DISCONNECTED
-                    else:
-                        status = AdapterStatus.UNKNOWN
+        adapters = []
+        for item in raw:
+            name = item.get("Name", "")
+            description = item.get("Description", "")
+            status_str = str(item.get("Status", "")).lower()
 
-                # 获取 IP 配置
-                ip_info = self._get_ip_config(name)
-                adapter = NetworkAdapter(
-                    name=name,
-                    status=status,
-                    ip_address=ip_info.get("ip", ""),
-                    subnet_mask=ip_info.get("mask", ""),
-                    default_gateway=ip_info.get("gateway"),
-                    dns_servers=ip_info.get("dns", []),
-                    is_dhcp=ip_info.get("is_dhcp", False)
-                )
-                adapters.append(adapter)
+            if status_str == "up":
+                status = AdapterStatus.CONNECTED
+            elif status_str == "down":
+                status = AdapterStatus.DISCONNECTED
+            else:
+                status = AdapterStatus.UNKNOWN
+
+            # 过滤：仅物理 + 已连接
+            if physical_only:
+                if status != AdapterStatus.CONNECTED:
+                    continue
+                if not self._is_physical(name, description):
+                    continue
+
+            # 解析 IP 列表（"ip/prefix,ip/prefix"）
+            ips_str = item.get("Ips", "") or ""
+            gateway = item.get("Gateway") or None
+
+            ip_entries = []
+            for entry in ips_str.split(","):
+                entry = entry.strip()
+                if "/" not in entry:
+                    continue
+                ip, _, prefix = entry.partition("/")
+                if self._validate_ip(ip):
+                    mask = self._prefix_to_subnet_mask(int(prefix)) if prefix.isdigit() else "255.255.255.0"
+                    ip_entries.append((ip, mask))
+
+            # 主 IP：优先取与网关同网段的；否则取第一个
+            ip_address = ""
+            subnet_mask = ""
+            if ip_entries:
+                ip_address, subnet_mask = ip_entries[0]
+                if gateway:
+                    for ip, mask in ip_entries:
+                        if self._same_subnet(ip, gateway, mask):
+                            ip_address, subnet_mask = ip, mask
+                            break
+
+            dns_str = item.get("Dns", "") or ""
+            dns_servers = [d.strip() for d in dns_str.split(",") if self._validate_ip(d.strip())]
+
+            is_dhcp = str(item.get("Dhcp", "")).lower() == "enabled"
+
+            adapters.append(NetworkAdapter(
+                name=name,
+                status=status,
+                ip_address=ip_address,
+                subnet_mask=subnet_mask,
+                default_gateway=gateway,
+                dns_servers=dns_servers,
+                is_dhcp=is_dhcp,
+            ))
 
         return adapters
 
-    def _get_ip_config(self, adapter_name: str) -> dict:
-        """
-        获取指定适配器的 IP 配置
-
-        Args:
-            adapter_name: 适配器名称
-
-        Returns:
-            IP 配置字典
-        """
-        config = {
-            "ip": "",
-            "mask": "",
-            "gateway": None,
-            "dns": [],
-            "is_dhcp": False
-        }
-
-        # 使用 PowerShell 获取 IP 配置
-        cmd = f'Get-NetIPAddress -InterfaceAlias "{adapter_name}" -AddressFamily IPv4 | Select-Object IPAddress, PrefixLength'
-        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
-
-        if success and stdout.strip():
-            # 解析 PowerShell 输出
-            lines = stdout.strip().split('\n')
-            for line in lines[2:]:  # 跳过标题行
-                parts = line.split()
-                if len(parts) >= 2:
-                    ip = parts[0]
-                    prefix_length = parts[1]
-
-                    # 验证 IP 地址格式
-                    if self._validate_ip(ip):
-                        config["ip"] = ip
-
-                        # 将前缀长度转换为子网掩码
-                        if prefix_length.isdigit():
-                            prefix = int(prefix_length)
-                            mask = self._prefix_to_subnet_mask(prefix)
-                            config["mask"] = mask
-                        break
-
-        # 获取默认网关
-        cmd = f'Get-NetRoute -InterfaceAlias "{adapter_name}" -DestinationPrefix "0.0.0.0/0" | Select-Object NextHop'
-        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
-
-        if success and stdout.strip():
-            lines = stdout.strip().split('\n')
-            for line in lines[2:]:
-                parts = line.split()
-                if parts:
-                    gateway = parts[0]
-                    if self._validate_ip(gateway):
-                        config["gateway"] = gateway
-                        break
-
-        # 获取 DNS 服务器
-        cmd = f'Get-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -AddressFamily IPv4 | Select-Object ServerAddresses'
-        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
-
-        if success and stdout.strip():
-            # 解析 DNS 服务器地址（可能以逗号分隔）
-            dns_matches = re.findall(r'(\d+\.\d+\.\d+\.\d+)', stdout)
-            config["dns"] = dns_matches
-
-        # 检查是否为 DHCP
-        cmd = f'Get-NetIPInterface -InterfaceAlias "{adapter_name}" -AddressFamily IPv4 | Select-Object Dhcp'
-        success, stdout, stderr = self._run_command(cmd, use_powershell=True)
-
-        if success and stdout.strip():
-            if "Enabled" in stdout:
-                config["is_dhcp"] = True
-
-        return config
+    def _same_subnet(self, ip1: str, ip2: str, mask: str) -> bool:
+        """判断两个 IP 是否在同一子网"""
+        try:
+            def to_int(s):
+                a, b, c, d = (int(x) for x in s.split("."))
+                return (a << 24) | (b << 16) | (c << 8) | d
+            m = to_int(mask)
+            return (to_int(ip1) & m) == (to_int(ip2) & m)
+        except (ValueError, AttributeError):
+            return False
 
     def _prefix_to_subnet_mask(self, prefix: int) -> str:
         """

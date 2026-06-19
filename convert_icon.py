@@ -1,96 +1,66 @@
-"""转换 SVG 图标为 ICO 格式"""
+"""生成应用程序 ICO 图标"""
 
-def convert_svg_to_ico():
-    """使用 Pillow 创建 ICO 图标"""
-    try:
-        from PIL import Image, ImageDraw
-        import os
-        import struct
+from PIL import Image, ImageDraw
+import os
 
-        # 创建一个简单的图标
-        def create_icon(size):
-            img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
 
-            # 绘制背景圆
-            margin = size // 10
-            draw.ellipse([margin, margin, size - margin, size - margin], fill='#2c3e50')
+def create_icon(size: int) -> Image.Image:
+    """绘制指定尺寸的图标"""
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
 
-            # 绘制四个节点
-            node_size = size // 6
-            center_x, center_y = size // 2, size // 2
+    # 背景圆
+    margin = size // 12
+    draw.ellipse([margin, margin, size - margin, size - margin], fill="#2c3e50")
 
-            # 节点 A (左上)
-            draw.ellipse([center_x - size//4 - node_size//2, center_y - size//4 - node_size//2,
-                         center_x - size//4 + node_size//2, center_y - size//4 + node_size//2],
-                        fill='#3498db')
+    center = size // 2
+    offset = size // 4
+    node = size // 7
 
-            # 节点 B (右上)
-            draw.ellipse([center_x + size//4 - node_size//2, center_y - size//4 - node_size//2,
-                         center_x + size//4 + node_size//2, center_y - size//4 + node_size//2],
-                        fill='#e74c3c')
+    nodes = {
+        (center - offset, center - offset): "#3498db",  # A 左上
+        (center + offset, center - offset): "#e74c3c",  # B 右上
+        (center - offset, center + offset): "#2ecc71",  # C 左下
+        (center + offset, center + offset): "#f39c12",  # D 右下
+    }
 
-            # 节点 C (左下)
-            draw.ellipse([center_x - size//4 - node_size//2, center_y + size//4 - node_size//2,
-                         center_x - size//4 + node_size//2, center_y + size//4 + node_size//2],
-                        fill='#2ecc71')
+    # 连接线
+    line_w = max(1, size // 40)
+    pts = list(nodes.keys())
+    draw.line([pts[0], pts[1]], fill="#ecf0f1", width=line_w)
+    draw.line([pts[2], pts[3]], fill="#ecf0f1", width=line_w)
+    draw.line([pts[0], pts[2]], fill="#ecf0f1", width=line_w)
+    draw.line([pts[1], pts[3]], fill="#ecf0f1", width=line_w)
+    draw.line([pts[0], pts[3]], fill="#bdc3c7", width=max(1, line_w // 2))
+    draw.line([pts[1], pts[2]], fill="#bdc3c7", width=max(1, line_w // 2))
 
-            # 节点 D (右下)
-            draw.ellipse([center_x + size//4 - node_size//2, center_y + size//4 - node_size//2,
-                         center_x + size//4 + node_size//2, center_y + size//4 + node_size//2],
-                        fill='#f39c12')
+    # 节点
+    for (x, y), color in nodes.items():
+        draw.ellipse([x - node, y - node, x + node, y + node], fill=color)
 
-            # 绘制连接线
-            line_width = max(1, size // 50)
-            draw.line([center_x - size//4, center_y - size//4, center_x + size//4, center_y - size//4],
-                     fill='#ecf0f1', width=line_width)
-            draw.line([center_x - size//4, center_y + size//4, center_x + size//4, center_y + size//4],
-                     fill='#ecf0f1', width=line_width)
-            draw.line([center_x - size//4, center_y - size//4, center_x - size//4, center_y + size//4],
-                     fill='#ecf0f1', width=line_width)
-            draw.line([center_x + size//4, center_y - size//4, center_x + size//4, center_y + size//4],
-                     fill='#ecf0f1', width=line_width)
+    return img
 
-            return img
 
-        # 先保存为 PNG
-        png_path = "assets/icon.png"
-        img_256 = create_icon(256)
-        img_256.save(png_path, format="PNG")
+def main():
+    os.makedirs("assets", exist_ok=True)
 
-        # 使用 Pillow 转换为 ICO
-        # 创建不同尺寸的图像
-        sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-        images = []
-        for size in sizes:
-            img = create_icon(size[0])
-            images.append(img)
+    # 用 256x256 高清图作为基准，让 Pillow 内部生成全套尺寸
+    base = create_icon(256)
+    base.save("assets/icon.png", format="PNG")
 
-        # 保存为 ICO
-        output_path = "assets/icon.ico"
-        # 使用第一个图像作为基础，其他图像作为附加
-        images[0].save(
-            output_path,
-            format="ICO",
-            append_images=images[1:],
-            sizes=sizes
-        )
+    base.save(
+        "assets/icon.ico",
+        format="ICO",
+        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
 
-        # 验证文件
-        file_size = os.path.getsize(output_path)
-        print(f"图标创建成功: {output_path} ({file_size} 字节)")
+    size = os.path.getsize("assets/icon.ico")
+    print(f"icon.ico 生成成功: {size} 字节")
 
-        # 同时保存一个大的 PNG 用于预览
-        img_256.save("assets/icon_256.png", format="PNG")
-        print(f"PNG 图标也已保存: assets/icon_256.png")
+    # 校验包含的尺寸
+    ico = Image.open("assets/icon.ico")
+    print(f"包含尺寸: {sorted(ico.ico.sizes())}")
 
-        return True
-
-    except Exception as e:
-        print(f"创建失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
 
 if __name__ == "__main__":
-    convert_svg_to_ico()
+    main()

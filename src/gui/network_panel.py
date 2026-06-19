@@ -259,16 +259,30 @@ class NetworkPanel(QWidget):
         self.adapters = adapters
         self.refresh_btn.setEnabled(True)
 
-        # 更新下拉框
+        # 填充下拉框时阻塞信号，避免 addItem/setCurrentIndex 反复触发回调
+        self.adapter_combo.blockSignals(True)
         self.adapter_combo.clear()
         for adapter in adapters:
             self.adapter_combo.addItem(f"{adapter.name} ({adapter.status.value})", adapter.name)
 
-        # 找到已连接的适配器并选中
+        # 选中第一个已连接的适配器
+        target_index = 0
         for i, adapter in enumerate(adapters):
             if adapter.status.value == "connected":
-                self.adapter_combo.setCurrentIndex(i)
+                target_index = i
                 break
+        if adapters:
+            self.adapter_combo.setCurrentIndex(target_index)
+        self.adapter_combo.blockSignals(False)
+
+        # 填充完成后手动同步一次当前适配器的信息
+        if adapters:
+            self.current_adapter = adapters[target_index]
+            self._update_adapter_info()
+            self._update_ip_table()
+        else:
+            self.current_adapter = None
+            self.adapter_info_label.setText("未检测到物理网卡")
 
         self.status_label.setText(f"检测到 {len(adapters)} 个网络适配器")
 
